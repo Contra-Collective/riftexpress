@@ -55,12 +55,12 @@ const ListQuerySchema = z.object({
 })
 
 export function notesRouter(db: DB): Router {
-  const r = Router()
+  const router = Router()
   const stmts = prepared(db)
   const ftsEnabled = hasFts5(db)
 
   // GET /api/notes — list (paginated, filterable, searchable).
-  r.get('/', (ctx) => {
+  router.get('/', (ctx) => {
     const user = ctx.requireAuth()
     const parsed = ListQuerySchema.safeParse(Object.fromEntries(ctx.query))
     if (!parsed.success) {
@@ -89,7 +89,7 @@ export function notesRouter(db: DB): Router {
   })
 
   // POST /api/notes — create.
-  r.post('/', async (ctx) => {
+  router.post('/', async (ctx) => {
     const user = ctx.requireAuth()
     const input = await ctx.body.json(CreateNoteSchema)
     const now = Date.now()
@@ -106,7 +106,7 @@ export function notesRouter(db: DB): Router {
   })
 
   // GET /api/notes/:id — single note. 404 if not yours or doesn't exist.
-  r.get('/:id', (ctx) => {
+  router.get('/:id', (ctx) => {
     const user = ctx.requireAuth()
     const row = stmts.findNoteById.get(ctx.params.id) as NoteRow | undefined
     if (!row || row.user_id !== user.id) throw new RiftexNotFoundError('Note not found')
@@ -114,7 +114,7 @@ export function notesRouter(db: DB): Router {
   })
 
   // PATCH /api/notes/:id — partial update.
-  r.patch('/:id', async (ctx) => {
+  router.patch('/:id', async (ctx) => {
     const user = ctx.requireAuth()
     const existing = stmts.findNoteById.get(ctx.params.id) as NoteRow | undefined
     if (!existing || existing.user_id !== user.id) throw new RiftexNotFoundError('Note not found')
@@ -140,7 +140,7 @@ export function notesRouter(db: DB): Router {
   })
 
   // DELETE /api/notes/:id — soft 404 if it isn't theirs (don't leak existence).
-  r.delete('/:id', (ctx) => {
+  router.delete('/:id', (ctx) => {
     const user = ctx.requireAuth()
     const existing = stmts.findNoteById.get(ctx.params.id) as NoteRow | undefined
     if (!existing || existing.user_id !== user.id) throw new RiftexNotFoundError('Note not found')
@@ -149,7 +149,7 @@ export function notesRouter(db: DB): Router {
     // Returning undefined here triggers the framework's 204-no-content rule.
   })
 
-  return r
+  return router
 }
 
 // ───── helpers ────────────────────────────────────────────────────────────

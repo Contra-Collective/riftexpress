@@ -9,9 +9,9 @@ const VERSION = '0.0.1'
 const startedAt = Date.now()
 
 export function healthRouter(db: DB): Router {
-  const r = Router()
+  const router = Router()
 
-  r.get('/', (ctx) => {
+  router.get('/', (ctx) => {
     let dbStatus: 'up' | 'down' = 'up'
     try {
       db.prepare('SELECT 1').get()
@@ -31,5 +31,5 @@ export function healthRouter(db: DB): Router {
     )
   })
 
-  return r
+  return router
 }

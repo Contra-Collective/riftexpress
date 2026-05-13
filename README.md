@@ -202,9 +202,10 @@ app.post('/users', (req, res) => {              app.post('/users', async (ctx) =
   res.status(201).json(user)                      return ctx.json(user, 201)
 })                                              })
 
-const r = express.Router()                      const r = riftex.Router()
-r.get('/health', (req, res) => res.json({ok:1}))r.get('/health', () => ({ ok: 1 }))
-app.use('/api', r)                              app.use('/api', r)
+const router = express.Router()                 const router = riftex.Router()
+router.get('/health', (req, res) =>             router.get('/health', () => ({ ok: 1 }))
+  res.json({ok:1}))
+app.use('/api', router)                         app.use('/api', router)
 
 app.use((err, req, res, next) => {              app.onError((err, ctx) => {
   res.status(500).json({err: err.message})        ctx.json({ err: err.message }, 500)

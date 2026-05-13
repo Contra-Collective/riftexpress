@@ -8,7 +8,7 @@ The router is a radix trie matched at request time. Registrations are journaled,
 import { Router } from 'riftexpress'
 // or: const Router = riftex.Router
 
-const r = Router()
+const router = Router()
 ```
 
 Constructs a fresh `Router`. Both `Router()` and `riftex.Router()` resolve to the same constructor. There is no required argument.
@@ -38,11 +38,11 @@ class Router {
 
 ## Mount semantics
 
-When you `app.use('/api', r)` (or `parent.use('/api', r)`), the parent flattens `r`'s journal at compose time, prepending `/api` to every entry:
+When you `app.use('/api', router)` (or `parent.use('/api', router)`), the parent flattens `router`'s journal at compose time, prepending `/api` to every entry:
 
-- `r.get('/users')` becomes `/api/users` in the parent's trie.
-- Middleware that was global inside `r` becomes scoped to the `/api` prefix in the parent.
-- Middleware mounted inside `r` at `/v1` becomes `/api/v1` in the parent.
+- `router.get('/users')` becomes `/api/users` in the parent's trie.
+- Middleware that was global inside `router` becomes scoped to the `/api` prefix in the parent.
+- Middleware mounted inside `router` at `/v1` becomes `/api/v1` in the parent.
 - Sub-routers compose recursively.
 
 Prefix normalization: leading `/` is added if missing, trailing `/` is stripped, and `''`/`'/'` mean "no prefix" (used internally when a router is its own root).
@@ -59,10 +59,10 @@ Prefix normalization: leading `/` is added if missing, trailing `/` is stripped,
 Examples:
 
 ```ts
-r.get('/users/:id',           handler)   // /users/42
-r.get('/users/:id?',          handler)   // /users  AND  /users/42
-r.get('/files/*path',         handler)   // /files/a/b/c.png  → params.path = 'a/b/c.png'
-r.get('/blog/:year/:slug',    handler)   // /blog/2025/hello
+router.get('/users/:id',           handler)   // /users/42
+router.get('/users/:id?',          handler)   // /users  AND  /users/42
+router.get('/files/*path',         handler)   // /files/a/b/c.png  → params.path = 'a/b/c.png'
+router.get('/blog/:year/:slug',    handler)   // /blog/2025/hello
 ```
 
 ### Precedence and backtrack

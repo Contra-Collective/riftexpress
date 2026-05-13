@@ -30,11 +30,11 @@ function publicUser(u: AuthUser): {
 }
 
 export function usersRouter(db: DB): Router {
-  const r = Router()
+  const router = Router()
   const stmts = prepared(db)
 
   // POST /api/users/signup — create an account. Returns the user + a fresh token.
-  r.post('/signup', async (ctx) => {
+  router.post('/signup', async (ctx) => {
     const input = await ctx.body.json(SignupSchema)
 
     const existing = stmts.findUserByEmail.get(input.email) as AuthUser | undefined
@@ -59,7 +59,7 @@ export function usersRouter(db: DB): Router {
   // POST /api/users/tokens — issue a new token for an existing user.
   // Real apps would gate this on a password / OTP / OAuth flow; this is a
   // demo, so possession of the email is enough.
-  r.post('/tokens', async (ctx) => {
+  router.post('/tokens', async (ctx) => {
     const input = await ctx.body.json(TokenSchema)
     const user = stmts.findUserByEmail.get(input.email) as AuthUser | undefined
     if (!user) throw new RiftexBadRequestError('No account for that email')
@@ -70,12 +70,12 @@ export function usersRouter(db: DB): Router {
   })
 
   // GET /api/users/me — protected. Returns the caller's profile.
-  r.get('/me', (ctx) => {
+  router.get('/me', (ctx) => {
     const user = ctx.requireAuth()
     return { user: publicUser(user) }
   })
 
-  return r
+  return router
 }
 
 function newToken(): string {

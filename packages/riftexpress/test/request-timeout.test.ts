@@ -140,19 +140,23 @@ describe('requestTimeoutMs: late writes from orphaned handler do NOT corrupt nex
     }
     process.on('warning', warnHandler)
 
+    // Reach the private pool — testing the exact recycle path is the whole
+    // point of this test, so an unsafe cast is justified.
+    const pool = (app as unknown as { pool: { acquire(): RiftexContext; release(c: RiftexContext): void } }).pool
+
     try {
       // Manually drive both requests through the SAME ctx, releasing
       // between them so the pool reuses it.
-      const ctx1 = app['pool'].acquire()
+      const ctx1 = pool.acquire()
       ctx1.method = 'GET'
       ctx1.url = '/slow'
       ctx1.path = '/slow'
       ctx1.rawQuery = ''
       await app.handle(ctx1)
       expect(ctx1._statusCode).toBe(503)
-      app['pool'].release(ctx1)
+      pool.release(ctx1)
 
-      const ctx2 = app['pool'].acquire()
+      const ctx2 = pool.acquire()
       // Same instance (1-slot pool).
       expect(ctx2).toBe(ctx1)
       ctx2.method = 'GET'
@@ -215,28 +219,29 @@ describe('requestTimeoutMs: undefined disables the race', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('requestTimeoutMs: timer is unref()\'d', () => {
-  it('setTimeout is called with .unref() in the chain', async () => {
+  it('the timeout setTimeout call returns a handle that gets .unref() invoked', async () => {
+    // Spy on setTimeout. raceWithTimeout calls it ONCE per dispatch, and
+    // immediately invokes .unref() on the returned timer handle — so a
+    // fast-resolving handler with a long configured timeout doesn't keep
+    // the event loop alive.
     const realSetTimeout = globalThis.setTimeout
     const unrefSpy = vi.fn()
-    const fakeTimer = { unref: unrefSpy } as unknown as ReturnType<typeof setTimeout>
-    // Patch only the setTimeout used INSIDE raceWithTimeout. The handler
-    // resolves immediately, so the timer is created then cleared — we
-    // just need to observe that .unref was called on the returned handle.
-    const calls: number[] = []
-    const fake: typeof setTimeout = ((fn: (...a: unknown[]) => void, ms?: number) => {
-      calls.push(ms ?? 0)
-      // For the timeout we DON'T want it to actually fire — return our
-      // fake timer with a no-op unref. For any other (non-timeout)
-      // setTimeout (e.g. the test's own scheduling), defer to the real one.
-      if (calls.length === 1) {
-        return fakeTimer as unknown as ReturnType<typeof setTimeout>
+    let timeoutHandleCount = 0
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+      const h = realSetTimeout(fn, ms, ...(rest as [])) as ReturnType<typeof setTimeout>
+      // Wrap .unref to observe; only the FIRST setTimeout per app.handle
+      // call is the one inside raceWithTimeout (the dispatched handler is
+      // synchronous). Filter by the configured ms to be safe.
+      if (ms === 5_000) {
+        timeoutHandleCount++
+        const origUnref = h.unref.bind(h)
+        h.unref = (() => {
+          unrefSpy()
+          return origUnref()
+        }) as typeof h.unref
       }
-      return realSetTimeout(fn, ms)
+      return h
     }) as typeof setTimeout
-    ;(fake as unknown as { __promisify__?: unknown }).__promisify__ = (
-      realSetTimeout as unknown as { __promisify__?: unknown }
-    ).__promisify__
-    globalThis.setTimeout = fake
     try {
       const app = new RiftexApp({ requestTimeoutMs: 5_000 })
       app.get('/', (ctx) => ctx.json({ ok: true }))
@@ -246,7 +251,8 @@ describe('requestTimeoutMs: timer is unref()\'d', () => {
       ctx.path = '/'
       await app.handle(ctx)
       expect(ctx._statusCode).toBe(200)
-      expect(unrefSpy).toHaveBeenCalled()
+      expect(timeoutHandleCount).toBe(1)
+      expect(unrefSpy).toHaveBeenCalledTimes(1)
     } finally {
       globalThis.setTimeout = realSetTimeout
     }

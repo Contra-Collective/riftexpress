@@ -357,7 +357,7 @@ export interface RiftexFactory {
 export type RiftexErrorReturn = unknown | Promise<unknown>
 
 /** Function-with-properties factory created and exported by `index.ts`. */
-export function makeRexFactory(): RiftexFactory {
+export function makeRiftexFactory(): RiftexFactory {
   const fn = ((options?: RiftexAppOptions) => new RiftexApp(options)) as RiftexFactory
   fn.Router = () => new Router()
   return fn

@@ -4,12 +4,13 @@
  * @packageDocumentation
  */
 
-import { makeRexFactory, type RiftexFactory } from './app.ts'
+import { makeRiftexFactory, type RiftexFactory } from './app.ts'
 import { jsonMiddleware, urlencodedMiddleware } from './body/middleware.ts'
 import { staticMiddleware } from './static/middleware.ts'
 import { corsMiddleware } from './cors/middleware.ts'
 import { sse } from './sse/sse.ts'
 import { rateLimit } from './rate-limit/middleware.ts'
+import { csrfMiddleware } from './csrf/middleware.ts'
 
 // ───── App + Router ────────────────────────────────────────────────────────
 export { RiftexApp, type RiftexAppOptions, type RiftexErrorHandler } from './app.ts'
@@ -83,6 +84,10 @@ export { rateLimit } from './rate-limit/middleware.ts'
 export { MemoryStore as RateLimitMemoryStore } from './rate-limit/store.ts'
 export type { RateLimitOptions, RateLimitStore } from './rate-limit/types.ts'
 
+// ───── CSRF middleware ─────────────────────────────────────────────────────
+export { csrfMiddleware, RiftexCsrfError } from './csrf/middleware.ts'
+export type { CsrfOptions, CsrfStorage, CsrfCookieOptions, CsrfValueReader } from './csrf/types.ts'
+
 // ───── Session middleware ──────────────────────────────────────────────────
 export { sessionMiddleware } from './session/middleware.ts'
 export { MemoryStore as SessionMemoryStore } from './session/store-memory.ts'
@@ -136,7 +141,7 @@ export { DecoratorRegistry } from './plugin/decorators.ts'
  * app.get('/', (ctx) => ({ hello: 'world' }))
  * await app.listen(3000)
  */
-const rexCore: RiftexFactory = makeRexFactory()
+const riftexCore: RiftexFactory = makeRiftexFactory()
 
 /**
  * The `riftex` export is callable AND has static helpers attached:
@@ -148,11 +153,12 @@ const rexCore: RiftexFactory = makeRexFactory()
  * - `riftex.static(root, opts?)` — serve files from a directory
  * - `riftex.cors(opts?)` — CORS middleware (simple + preflight)
  */
-export const riftex = Object.assign(rexCore, {
+export const riftex = Object.assign(riftexCore, {
   json: jsonMiddleware,
   urlencoded: urlencodedMiddleware,
   static: staticMiddleware,
   cors: corsMiddleware,
+  csrf: csrfMiddleware,
   sse,
   rateLimit,
 })

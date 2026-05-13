@@ -38,6 +38,7 @@ RiftExpress is what happens if you fix Express's three structural problems — l
   - [`riftex.cors`](#riftexcors)
   - [`riftex.sse` (Server-Sent Events)](#riftexsse-server-sent-events)
   - [`riftex.rateLimit`](#riftexratelimit)
+  - [`riftex.csrf`](#riftexcsrf)
   - [`sessionMiddleware`](#sessionmiddleware)
 - [Transports](#transports)
   - [Node `http` (default)](#node-http-default)
@@ -476,6 +477,41 @@ app.use(riftex.rateLimit({
 ```
 
 Fixed-window in-memory store (`MemoryStore`) by default, with cleanup interval `unref()`'d so it never holds the event loop alive. Pluggable via the `RateLimitStore` interface (Promise-returning so a Redis-backed store fits cleanly). Sets `X-RateLimit-{Limit,Remaining,Reset}` on every response and `Retry-After` on 429s.
+
+### `riftex.csrf`
+
+```ts
+import { riftex } from 'riftexpress'
+
+const app = riftex()
+app.use(riftex.csrf({
+  secret: process.env.CSRF_SECRET!,    // required for cookie storage
+  storage: 'cookie',                    // 'cookie' (default) | 'session'
+  cookie: { sameSite: 'lax', secure: true },
+  ignoreMethods: ['GET', 'HEAD', 'OPTIONS', 'TRACE'],
+  // skip: (ctx) => ctx.path.startsWith('/api/webhooks/'),  // opt-out
+}))
+
+app.get('/form', (ctx) => {
+  // ctx.csrfToken() returns the current token to embed in HTML / send to a JS client.
+  return `<form method="POST" action="/submit">
+    <input type="hidden" name="_csrf" value="${ctx.csrfToken()}">
+    <button>Submit</button>
+  </form>`
+})
+
+app.post('/submit', async (ctx) => {
+  // CSRF middleware already validated; if we got here the token is good.
+  const body = await ctx.body.json()
+  return { ok: true, body }
+})
+```
+
+Two storage modes:
+- **`cookie`** (default, no session needed) — double-submit cookie pattern with HMAC-signed tokens. The token is written to a non-`HttpOnly` cookie on safe requests; the client must echo it back via `X-CSRF-Token` (or `X-XSRF-Token` for Angular, or `?_csrf=` query param) on unsafe requests. Same-origin policy + HMAC verification together prevent forgery.
+- **`session`** — synchronizer pattern. Token stored on `ctx.session.csrfToken`; submitted token compared against it. Requires `sessionMiddleware` to run first; throws a clear developer error if missing.
+
+Verification uses `crypto.timingSafeEqual`. Secret rotation supported (`secret: ['new', 'old']`). Failures throw `RiftexCsrfError` (HTTP 403, code `CSRF_FAILED`) which the default error boundary serializes; catch in `app.onError` for custom handling.
 
 ### `sessionMiddleware`
 

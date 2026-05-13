@@ -330,7 +330,7 @@ shim and need native ports (or replacement) before v1.0:
 | `multer`             | Owns the request stream and writes to `req.files`; clashes with lazy `ctx.body`. Needs a native `ctx.body.multipart()` API. |
 | `passport`           | Strategies mutate `req.user` and call `req.logIn` / session APIs the shim doesn't provide. |
 | `express-session`    | Hooks `res.end` to flush the session and depends on a cookie-jar contract we don't expose. |
-| `csurf`              | Requires `express-session` + form parsing it controls; needs a native double-submit / origin-check helper. |
+| `csurf`              | Deprecated by its own author; use **`riftex.csrf({ secret })`** instead — see below. |
 | `express-rate-limit` | Patches `res` and uses Express response lifecycle hooks; needs a native limiter middleware (planned). |
 
 ---
@@ -356,6 +356,43 @@ shim and need native ports (or replacement) before v1.0:
 - **Lazy composition, not frozen-after-listen.** You can `app.get(...)`
   after `app.listen(...)` and the next request will see it (a dirty flag
   triggers recomposition). Useful for tests; avoid in hot paths.
+
+---
+
+## CSRF protection (`csurf` → `riftex.csrf`)
+
+Express's `csurf` package was deprecated by its maintainer in 2022 and never
+had a clean replacement in the Express ecosystem. RiftExpress ships
+`riftex.csrf(opts)` natively.
+
+```ts
+// Express + the (deprecated) csurf package
+import csurf from 'csurf'
+app.use(csurf({ cookie: true }))
+
+app.get('/form', (req, res) => res.send(`<form>
+  <input type="hidden" name="_csrf" value="${req.csrfToken()}">
+</form>`))
+```
+
+```ts
+// RiftExpress
+import { riftex } from 'riftexpress'
+
+app.use(riftex.csrf({
+  secret: process.env.CSRF_SECRET!,    // required for cookie storage
+  cookie: { sameSite: 'lax', secure: true },
+}))
+
+app.get('/form', (ctx) => `<form>
+  <input type="hidden" name="_csrf" value="${ctx.csrfToken()}">
+</form>`)
+```
+
+Two storage modes — `'cookie'` (default; double-submit with HMAC, no
+session needed) and `'session'` (synchronizer pattern; pair with
+`sessionMiddleware`). Failures throw `RiftexCsrfError` (HTTP 403). See
+[docs/api/csrf.md](api/csrf.md) for the full surface.
 
 ---
 

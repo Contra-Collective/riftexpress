@@ -11,8 +11,41 @@ deferred items and likely-to-shift surfaces.
 
 ## [Unreleased]
 
-- Nothing pending. Open work items are tracked in `docs/roadmap.md` under
-  "Deferred to next session" and "Open questions".
+### Added
+
+- **CSRF protection.** Native `riftex.csrf(opts)` middleware (also exported as
+  `csrfMiddleware`). Two storage modes:
+  - `'cookie'` (default): double-submit cookie pattern with HMAC-SHA-256
+    signing. Token written to a non-`HttpOnly` cookie on safe requests; client
+    must echo via `X-CSRF-Token` (or `X-XSRF-Token` / `?_csrf=`) on unsafe
+    requests. Verified with `crypto.timingSafeEqual`. Secret rotation supported.
+  - `'session'`: synchronizer pattern. Token stored on `ctx.session.csrfToken`,
+    requires `sessionMiddleware` to run first.
+  - Failures throw `RiftexCsrfError` (HTTP 403, code `CSRF_FAILED`).
+  - Token exposed via `ctx.csrfToken()` and `ctx.state.csrfToken` for embedding
+    in HTML forms.
+  - 23 unit tests across both modes, including timing-safe compare and rotation.
+
+- **`docs/api/csrf.md`** — full CSRF reference (storage modes, options,
+  failure mode, rotation, skip patterns, what CSRF does NOT replace).
+- **`docs/deployment.md`** — production deployment guide (nginx, Caddy, CDN,
+  Docker, k8s, env vars, graceful shutdown, observability, HTTPS, process
+  managers, pre-flight checklist).
+- **`CODE_OF_CONDUCT.md`** — Contributor Covenant v2.1 reference.
+
+### Changed
+
+- Renamed `makeRexFactory` → `makeRiftexFactory` and `rexCore` → `riftexCore`
+  (caught by post-rename sweep — the word-boundary script missed
+  mid-camelCase tokens).
+
+### Fixed
+
+- **Middleware now runs on trie misses.** `app.use(riftex.static(...))` and
+  `app.use(corsMw)` patterns work correctly: when no route matches, a
+  fallback chain composed of global + path-matching scoped middleware runs
+  before the 404/405 surfaces. Previously a request to an unregistered
+  path 404'd before any middleware fired.
 
 ## [0.1.0-alpha] - 2026-05-12
 

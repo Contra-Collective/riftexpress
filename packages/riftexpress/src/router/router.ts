@@ -6,7 +6,29 @@ export type Registration =
   | { kind: 'use-global'; mw: RiftexMiddleware }
   | { kind: 'use-prefix'; prefix: string; mw: RiftexMiddleware }
   | { kind: 'use-router'; prefix: string; router: Router }
-  | { kind: 'route'; method: HttpMethod; path: string; handler: RiftexHandler }
+  | {
+      kind: 'route'
+      method: HttpMethod
+      path: string
+      handler: RiftexHandler
+      /**
+       * Inline middleware passed positionally to `app.get(path, mw1, mw2, handler)`
+       * (and the equivalent declarative-options form on `RiftexApp`). Spliced into
+       * the composed chain AFTER global + scoped middleware AND BEFORE the handler.
+       * `undefined` for the back-compat single-arg form.
+       */
+      inlineMiddleware?: RiftexMiddleware[]
+    }
+
+/**
+ * Variadic route-arg shape: zero or more middleware followed by exactly one
+ * handler at the tail. The TypeScript trick `[...RiftexMiddleware[], RiftexHandler]`
+ * forces the tail position to be the handler while everything before it is
+ * middleware — preserves Express's `app.get(path, ...mw, handler)` ergonomics.
+ */
+export type RouteArgs<P = Record<string, string>> =
+  | [RiftexHandler<P>]
+  | [...RiftexMiddleware[], RiftexHandler<P>]
 
 /**
  * A mountable router. Registrations are journaled, not eagerly composed —
@@ -38,31 +60,80 @@ export class Router {
     return this
   }
 
-  get<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('GET', path, handler)
+  // ───── Verb registration ──────────────────────────────────────────────
+  // Each verb supports the back-compat `(path, handler)` shape AND the
+  // variadic `(path, ...inlineMiddleware, handler)` shape Express uses. The
+  // overloads keep TypeScript happy with the "handler is always last" rule.
+
+  get<P extends string>(path: P, handler: RiftexHandler): this
+  get<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  get<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('GET', path, ...args)
   }
-  post<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('POST', path, handler)
+  post<P extends string>(path: P, handler: RiftexHandler): this
+  post<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  post<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('POST', path, ...args)
   }
-  put<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('PUT', path, handler)
+  put<P extends string>(path: P, handler: RiftexHandler): this
+  put<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  put<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('PUT', path, ...args)
   }
-  patch<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('PATCH', path, handler)
+  patch<P extends string>(path: P, handler: RiftexHandler): this
+  patch<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  patch<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('PATCH', path, ...args)
   }
-  delete<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('DELETE', path, handler)
+  delete<P extends string>(path: P, handler: RiftexHandler): this
+  delete<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  delete<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('DELETE', path, ...args)
   }
-  head<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('HEAD', path, handler)
+  head<P extends string>(path: P, handler: RiftexHandler): this
+  head<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  head<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('HEAD', path, ...args)
   }
-  options<P extends string>(path: P, handler: RiftexHandler): this {
-    return this.method('OPTIONS', path, handler)
+  options<P extends string>(path: P, handler: RiftexHandler): this
+  options<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  options<P extends string>(path: P, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    return this.method('OPTIONS', path, ...args)
   }
 
-  /** Internal — register a route under any HTTP method. */
-  method(method: HttpMethod, path: string, handler: RiftexHandler): this {
-    this.journal.push({ kind: 'route', method, path: normalizePath(path), handler })
+  /**
+   * Internal — register a route under any HTTP method. Accepts the variadic
+   * `(...inlineMiddleware, handler)` tail; the LAST positional arg is always
+   * the handler.
+   */
+  method(method: HttpMethod, path: string, handler: RiftexHandler): this
+  method(method: HttpMethod, path: string, ...args: [...RiftexMiddleware[], RiftexHandler]): this
+  method(method: HttpMethod, path: string, ...args: [...RiftexMiddleware[], RiftexHandler]): this {
+    if (args.length === 0) {
+      throw new TypeError(`Router.${method.toLowerCase()}('${path}'): handler is required`)
+    }
+    const handler = args[args.length - 1] as RiftexHandler
+    if (typeof handler !== 'function') {
+      throw new TypeError(
+        `Router.${method.toLowerCase()}('${path}'): last argument must be a handler function`,
+      )
+    }
+    const inline = args.slice(0, -1) as RiftexMiddleware[]
+    for (let i = 0; i < inline.length; i++) {
+      if (typeof inline[i] !== 'function') {
+        throw new TypeError(
+          `Router.${method.toLowerCase()}('${path}'): inline middleware at position ${i} is not a function`,
+        )
+      }
+    }
+    const entry: Registration = {
+      kind: 'route',
+      method,
+      path: normalizePath(path),
+      handler,
+    }
+    if (inline.length > 0) entry.inlineMiddleware = inline
+    this.journal.push(entry)
     return this
   }
 }
@@ -96,7 +167,13 @@ function normalizePath(p: string): string {
 export interface FlatRegistrations {
   globalMiddleware: RiftexMiddleware[]              // unscoped (matches every request)
   scopedMiddleware: { prefix: string; mw: RiftexMiddleware }[]
-  routes: { method: HttpMethod; path: string; handler: RiftexHandler }[]
+  routes: {
+    method: HttpMethod
+    path: string
+    handler: RiftexHandler
+    /** Inline middleware survives the flatten so app.compose() can splice it in. */
+    inlineMiddleware?: RiftexMiddleware[]
+  }[]
 }
 
 export function flattenRouter(router: Router, prefix: string = ''): FlatRegistrations {
@@ -119,13 +196,18 @@ function flattenInto(router: Router, prefix: string, out: FlatRegistrations): vo
       case 'use-router':
         flattenInto(entry.router, prefix + entry.prefix, out)
         break
-      case 'route':
-        out.routes.push({
+      case 'route': {
+        const route: FlatRegistrations['routes'][number] = {
           method: entry.method,
           path: prefix + entry.path,
           handler: entry.handler,
-        })
+        }
+        if (entry.inlineMiddleware && entry.inlineMiddleware.length > 0) {
+          route.inlineMiddleware = entry.inlineMiddleware
+        }
+        out.routes.push(route)
         break
+      }
     }
   }
 }

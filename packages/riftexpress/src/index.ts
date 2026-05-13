@@ -18,7 +18,7 @@ import { apiKeyMiddleware } from './api-key/middleware.ts'
 import { openapiHandler } from './openapi/handler.ts'
 
 // ───── App + Router ────────────────────────────────────────────────────────
-export { RiftexApp, type RiftexAppOptions, type RiftexErrorHandler } from './app.ts'
+export { RiftexApp, type RiftexAppOptions, type RiftexErrorHandler, type RouteOptions } from './app.ts'
 export { Router } from './router/router.ts'
 
 // ───── Context + Body ──────────────────────────────────────────────────────
@@ -72,6 +72,7 @@ export {
   RiftexHeaderInjectionError,
   RiftexUnserializableError,
   RiftexTimeoutError,
+  RiftexHaltError,
 } from './errors.ts'
 
 // ───── JSON serialization helpers ──────────────────────────────────────────
@@ -182,6 +183,27 @@ export type {
   SecurityRequirement as OpenApiSecurityRequirement,
 } from './openapi/types.ts'
 
+// ───── Background jobs ─────────────────────────────────────────────────────
+export { RiftexQueue } from './jobs/queue.ts'
+export { QueueRegistry } from './jobs/registry.ts'
+export { MemoryQueueStore } from './jobs/store-memory.ts'
+export type {
+  QueueOptions,
+  QueueWorker,
+  QueueStore,
+  RetryPolicy,
+  FailedJob,
+  JobHandle,
+  RegisteredQueue,
+} from './jobs/types.ts'
+
+// ───── Cron scheduling ─────────────────────────────────────────────────────
+export { RiftexCronJob } from './cron/scheduler.ts'
+export type { CronHandler, CronOptions } from './cron/scheduler.ts'
+export { CronRegistry } from './cron/registry.ts'
+export { parseCronSpec, nextFireFrom } from './cron/parser.ts'
+export type { CronMatch } from './cron/parser.ts'
+
 // ───── Session middleware ──────────────────────────────────────────────────
 export { sessionMiddleware } from './session/middleware.ts'
 export { MemoryStore as SessionMemoryStore } from './session/store-memory.ts'
@@ -247,6 +269,33 @@ const riftexCore: RiftexFactory = makeRiftexFactory()
  * - `riftex.static(root, opts?)` — serve files from a directory
  * - `riftex.cors(opts?)` — CORS middleware (simple + preflight)
  */
+// ───── Sinatra-style top-level ──────────────────────────────────────────────
+//
+// Lets users skip the app object entirely:
+//
+//   import { get, listen } from 'riftexpress'
+//   get('/', () => 'hi')
+//   await listen(3000)
+//
+// Every verb routes to a lazy singleton `RiftexApp` (see `defaultApp()`).
+// `_resetDefaultApp` is test-only and throws under NODE_ENV=production.
+export {
+  defaultApp,
+  _resetDefaultApp,
+  get,
+  post,
+  put,
+  patch,
+  del as delete,
+  head,
+  options,
+  use,
+  onError,
+  listen,
+  before,
+  after,
+} from './sinatra/top-level.ts'
+
 export const riftex = Object.assign(riftexCore, {
   json: jsonMiddleware,
   urlencoded: urlencodedMiddleware,

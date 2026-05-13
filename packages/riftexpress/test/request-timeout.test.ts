@@ -171,7 +171,9 @@ describe('requestTimeoutMs: late writes from orphaned handler do NOT corrupt nex
       // NOW release the orphan. Its ctx.json call should be swallowed by
       // the still-installed late-write guard. Wait a tick for the orphan
       // continuation to run.
-      orphanRelease?.(undefined)
+      // TS narrows the let-bound closure capture to `never` here despite the
+      // assignment in the Promise constructor; explicit guard avoids the warn.
+      if (orphanRelease) (orphanRelease as (v: unknown) => void)(undefined)
       await new Promise((r) => setTimeout(r, 10))
 
       // The second request's response must be unchanged — orphan write

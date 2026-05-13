@@ -95,6 +95,46 @@ export class RiftexUnserializableError extends RiftexError {
 }
 
 /**
+ * Sinatra-style `halt` short-circuit. Thrown by `ctx.halt(status, body?)`;
+ * caught by the default error boundary and serialized according to `bodyShape`:
+ *
+ * - `'none'`  → boundary uses default `{ error, code: 'HALT' }` JSON shape.
+ * - `'text'`  → boundary writes `body` as `text/plain` verbatim.
+ * - `'json'`  → boundary writes `body` as `application/json`.
+ *
+ * The body shape is decided at the call site (string ⇒ text, object ⇒ json,
+ * undefined ⇒ none) so the boundary can branch without re-inspecting types.
+ * Custom `app.onError` handlers still receive the error and can override it
+ * (e.g. add a header, reshape the body) by writing the response themselves.
+ */
+export class RiftexHaltError extends RiftexError {
+  /** What the default error boundary should do with `body`. */
+  readonly bodyShape: 'none' | 'text' | 'json'
+  /** The body argument from `ctx.halt(status, body?)`. */
+  readonly body: string | Record<string, unknown> | undefined
+
+  constructor(statusCode: number, body?: string | Record<string, unknown>) {
+    let shape: 'none' | 'text' | 'json'
+    let message: string
+    if (body === undefined) {
+      shape = 'none'
+      message = `Halted with status ${statusCode}`
+    } else if (typeof body === 'string') {
+      shape = 'text'
+      message = body
+    } else {
+      shape = 'json'
+      // Best-effort message for ctx.error / logging; the JSON body is the
+      // wire-level payload regardless.
+      message = typeof body['error'] === 'string' ? (body['error'] as string) : 'HALT'
+    }
+    super(statusCode, 'HALT', message)
+    this.bodyShape = shape
+    this.body = body
+  }
+}
+
+/**
  * 503 — handler exceeded the configured `requestTimeoutMs` ceiling. The
  * orphaned handler is NOT cancelled (JavaScript can't safely cancel a
  * Promise); the framework just stops waiting for it. Late writes from the

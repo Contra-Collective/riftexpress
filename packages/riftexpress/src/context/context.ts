@@ -13,7 +13,7 @@ import {
 import { formatResponse, type FormatHandlers } from '../negotiation/format.ts'
 import { isFresh } from '../negotiation/fresh.ts'
 import { respondJsonWithEtag, type JsonEtagOptions } from '../negotiation/json-etag.ts'
-import { RiftexHeaderInjectionError, RiftexUnserializableError } from '../errors.ts'
+import { RiftexHaltError, RiftexHeaderInjectionError, RiftexUnserializableError } from '../errors.ts'
 
 /** CR/LF detector for header-injection guard. Tested against names + values. */
 const CRLF_RE = /[\r\n]/
@@ -124,6 +124,17 @@ export class RiftexContext<Params = Record<string, string>> {
   readonly body: RiftexBody = new RiftexBody()
   /** Free-form per-request state for plugins/middleware (e.g. `ctx.user = ...`). */
   state: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+
+  /**
+   * Per-request handle to enqueue background jobs onto a registered queue.
+   * Wired by `RiftexApp` as a lazy decorator (declared with `!` because the
+   * runtime value is installed by the decorator registry, not the class
+   * initializer). Throws if the named queue isn't registered.
+   *
+   * @example
+   *   await ctx.queue<{ to: string }>('emails').add({ to: 'a@b.com' })
+   */
+  queue!: <TData = unknown>(name: string) => import('../jobs/types.ts').JobHandle<TData>
 
   /** Lazy-parsed query. First access caches the URLSearchParams. */
   private _query: URLSearchParams | null = null
@@ -270,6 +281,28 @@ export class RiftexContext<Params = Record<string, string>> {
     if (contentType && !this._headers['content-type']) this._headers['content-type'] = contentType
     this._body = { kind: 'stream', data: readable }
     this._written = true
+  }
+
+  /**
+   * Sinatra-style short-circuit. Throws `RiftexHaltError(status, body?)`
+   * — the framework error boundary catches it and serializes per `bodyShape`:
+   *
+   * - `ctx.halt(401)` → 401 with default JSON `{ error, code: 'HALT' }`.
+   * - `ctx.halt(404, 'Not Found')` → 404 `text/plain` body verbatim.
+   * - `ctx.halt(422, { fields })` → 422 `application/json` body verbatim.
+   *
+   * The TypeScript `never` return type lets `if (!found) ctx.halt(404)`
+   * narrow the rest of the function — code after the call is unreachable.
+   *
+   * To bypass the error boundary entirely (write the response without
+   * throwing) call `ctx.json(body, status)` and `return` from the handler.
+   *
+   * @example
+   *   if (!authorized(ctx)) ctx.halt(401, 'Unauthorized')
+   *   if (!user)            ctx.halt(404, { error: 'Not Found', id })
+   */
+  halt(status: number, body?: string | Record<string, unknown>): never {
+    throw new RiftexHaltError(status, body)
   }
 
   /** Send a `Buffer` body verbatim. */

@@ -24,7 +24,7 @@
   "keywords": ["http", "express", "framework", "router", "fast"],
   "license": "MIT",
   "peerDependencies": {
-    "zod": "^3.23.0",
+    "zod": "^4.4.3",
     "ws": "^8.18.0"
   },
   "peerDependenciesMeta": {
@@ -32,7 +32,7 @@
     "ws": { "optional": true }
   },
   "devDependencies": {
-    "zod": "^3.23.0",
+    "zod": "^4.4.3",
     "ws": "^8.18.0",
     "@types/ws": "^8.5.0"
   }

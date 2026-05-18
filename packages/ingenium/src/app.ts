@@ -1,6 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { Buffer } from 'node:buffer'
-import { Readable } from 'node:stream'
 import { IngeniumContext } from './context/context.ts'
 import { IngeniumContextPool } from './context/pool.ts'
 import {
@@ -19,11 +17,13 @@ import type {
   Hooks,
   LazyDecorator,
   IngeniumPlugin,
+  PluginTarget,
 } from './plugin/types.ts'
 import { Router, flattenRouter } from './router/router.ts'
+import { ScopedApp } from './app/scope.ts'
 import { registerAfter, registerBefore } from './sinatra/filters.ts'
 import { EMPTY_PARAMS, RouterTrie, type MatchMiss } from './router/trie.ts'
-import type { ExtractParams, HttpMethod } from './router/types.ts'
+import type { HttpMethod } from './router/types.ts'
 import { NodeAdapter } from './transport/node.ts'
 import type { ListeningServer, Transport } from './transport/types.ts'
 import { descriptorKey, type RouteDescriptor } from './openapi/describe.ts'
@@ -91,76 +91,6 @@ export interface IngeniumAppOptions {
 /** Default transport-layer body ceiling — see {@link IngeniumAppOptions.maxRequestBytes}. */
 const DEFAULT_MAX_REQUEST_BYTES = 2_097_152
 
-/**
- * Synthetic request shape accepted by `app.inject(...)`. Mirrors a real HTTP
- * request closely enough that handlers can be tested without binding a port,
- * but skips everything the framework owns itself (parsing, dispatch, error
- * boundary). See `IngeniumApp.inject` for the body normalization rules.
- */
-export interface InjectRequest {
-  /** HTTP method. Defaults to `'GET'`. */
-  method?: HttpMethod
-  /** Full request URL including any query string (e.g. `/users/42?expand=posts`). */
-  url: string
-  /**
-   * Request headers. Keys are lowercased before being assigned to
-   * `ctx.headers`. Array values are passed through verbatim (multi-value
-   * headers like `set-cookie`).
-   */
-  headers?: Record<string, string | string[]>
-  /**
-   * Request body. Conversion rules:
-   * - `string` → wrapped as a UTF-8 buffer
-   * - `Buffer` / `Uint8Array` → used verbatim
-   * - object / array → JSON-stringified; `content-type: application/json`
-   *   is auto-set if not already present
-   * - omitted / null → no body source attached
-   */
-  body?: string | Buffer | Uint8Array | object
-  /** Override `ctx.remoteAddress`. Defaults to `'127.0.0.1'`. */
-  remoteAddress?: string
-}
-
-/**
- * Response captured from `app.inject(...)`. The body is always returned as a
- * UTF-8 string (streams are drained, buffers are decoded). `json()` is a
- * convenience that lazily `JSON.parse`s the body — call it on responses you
- * know are JSON.
- */
-export interface InjectResponse {
-  /** HTTP status code written by the handler (or by the error boundary). */
-  status: number
-  /** Response headers as recorded on the context (already lowercased keys). */
-  headers: Record<string, string | string[]>
-  /** Response body as a UTF-8 string. Empty for `kind: 'none'` responses. */
-  body: string
-  /** Convenience: `JSON.parse(this.body)` typed as `T`. */
-  json<T = unknown>(): T
-}
-
-/**
- * Drain an `IngeniumContext._body` into a UTF-8 string for `inject()`. For
- * streams we accumulate chunks into an array and concat once — same shape
- * `ctx.body.buffer()` uses on its slow path.
- */
-async function readResponseBody(body: IngeniumContext['_body']): Promise<string> {
-  switch (body.kind) {
-    case 'none':
-      return ''
-    case 'string':
-      return body.data
-    case 'buffer':
-      return body.data.toString('utf8')
-    case 'stream': {
-      const chunks: Buffer[] = []
-      for await (const chunk of body.data) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array))
-      }
-      return Buffer.concat(chunks).toString('utf8')
-    }
-  }
-}
-
 /** A user-supplied error handler. Return a non-error or call a `ctx` writer to recover. */
 export type IngeniumErrorHandler = (err: unknown, ctx: IngeniumContext) => unknown | Promise<unknown>
 
@@ -192,7 +122,7 @@ export type VerbArgs = unknown[]
  * on first request (or when `compose()` is called explicitly), and a dirty
  * bit triggers recomposition if registrations are added later.
  */
-export class IngeniumApp {
+export class IngeniumApp implements PluginTarget {
   private readonly pool: IngeniumContextPool
   private readonly transport: Transport
   private readonly router: Router = new Router()
@@ -220,13 +150,6 @@ export class IngeniumApp {
   private readonly _crons: CronRegistry = new CronRegistry()
   /** @internal Default queue-drain timeout used when the listener closes. */
   private readonly _queueDrainTimeoutMs: number
-  /**
-   * @internal Set to `true` between `transport.listen()` returning and the
-   * wrapped `close` resolving. Used to throw a clear error on the F5 footgun
-   * — calling `app.listen()` twice on the same app — instead of letting the
-   * second bind fail later with a cryptic "EADDRINUSE" from the OS.
-   */
-  private _listening = false
 
   /**
    * @internal Per-request dispatch booleans, recomputed at every `compose()`.
@@ -317,6 +240,80 @@ export class IngeniumApp {
   }
 
   /**
+   * Open a registration scope rooted at `prefix`. Routes, middleware, and
+   * sub-plugins registered through the `scope` parameter inside `registrar`
+   * are automatically prefix-qualified, so a plugin's `use(mw)` only applies
+   * to requests under `prefix` — not the whole app.
+   *
+   * This is the killer feature for sub-app affinity: today, plugins registered
+   * via `app.register(...)` decorate the WHOLE app (their `app.use(mw)` calls
+   * become global). Wrapping a `register(...)` call inside `app.scope(...)`
+   * confines the plugin's middleware to the scope's subtree, without forcing
+   * the user to manually prefix every route.
+   *
+   * The actual prefix-matching happens at compose time: scope translates
+   * `s.use(mw)` into `app.use(prefix, mw)` on the underlying router, which
+   * the existing `flattenRouter` / `RouterTrie` machinery already handles.
+   * Per-request dispatch sees no new work.
+   *
+   * @example
+   * app.scope('/api/v2', (s) => {
+   *   s.use(authPlugin)          // only runs for /api/v2/*
+   *   s.get('/users', listUsers) // registers at /api/v2/users
+   * })
+   *
+   * Nested scopes compose:
+   *
+   * @example
+   * app.scope('/api', (s) => {
+   *   s.scope('/v2', (s2) => {
+   *     s2.get('/users', listUsers) // /api/v2/users
+   *   })
+   * })
+   *
+   * # Caveat — decorators (V1)
+   *
+   * `scope.decorate(...)` decorates EVERY request, not just requests under
+   * `prefix`. Decorators install onto the pooled context at request start,
+   * before the route is matched. The first call from inside any scope emits
+   * a `process.emitWarning` in non-production environments to surface this.
+   * See `ScopedApp` for details.
+   *
+   * @returns `this` for chaining. If `registrar` is async, the returned
+   * promise is NOT awaited — callers who need async plugin registration
+   * inside a scope should await the `registrar` themselves (or use
+   * `scope.register(asyncPlugin)`, which returns a Promise).
+   */
+  scope(
+    prefix: string,
+    registrar: (scope: PluginTarget) => void | Promise<void>,
+  ): this {
+    const scoped = new ScopedApp(this, prefix)
+    const ret = registrar(scoped as unknown as PluginTarget)
+    // If the registrar is async, it's the caller's responsibility to await it
+    // (e.g. by awaiting `scope.register(asyncPlugin)` inside the body). We
+    // still mark dirty eagerly so synchronous registrations recompose next.
+    // Async paths additionally re-mark dirty when they resolve, just in case.
+    if (ret && typeof (ret as Promise<void>).then === 'function') {
+      ;(ret as Promise<void>).then(() => {
+        this.dirty = true
+      })
+    }
+    this.dirty = true
+    return this
+  }
+
+  /**
+   * @internal Mark the compose-cache dirty. Used by `ScopedApp` to invalidate
+   * after registering routes/middleware/plugins inside a scope. External
+   * callers should not depend on this — it's a friend-access seam for the
+   * scope facade.
+   */
+  _markDirty(): void {
+    this.dirty = true
+  }
+
+  /**
    * Add a lazy decorator. The factory is invoked the first time `ctx[name]`
    * is read; the result is cached on the context for the rest of the request.
    *
@@ -366,71 +363,71 @@ export class IngeniumApp {
   // options → middleware happens at REGISTRATION time, not request time, so
   // the per-request hot path has zero declarative-middleware overhead.
 
-  get<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  get<P extends string>(
-    path: P,
+  get(path: string, handler: IngeniumHandler): this
+  get(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   get(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('GET', path, ...args)
   }
 
-  post<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  post<P extends string>(
-    path: P,
+  post(path: string, handler: IngeniumHandler): this
+  post(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   post(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('POST', path, ...args)
   }
 
-  put<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  put<P extends string>(
-    path: P,
+  put(path: string, handler: IngeniumHandler): this
+  put(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   put(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('PUT', path, ...args)
   }
 
-  patch<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  patch<P extends string>(
-    path: P,
+  patch(path: string, handler: IngeniumHandler): this
+  patch(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   patch(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('PATCH', path, ...args)
   }
 
-  delete<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  delete<P extends string>(
-    path: P,
+  delete(path: string, handler: IngeniumHandler): this
+  delete(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   delete(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('DELETE', path, ...args)
   }
 
-  head<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  head<P extends string>(
-    path: P,
+  head(path: string, handler: IngeniumHandler): this
+  head(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   head(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('HEAD', path, ...args)
   }
 
-  options<P extends string>(path: P, handler: IngeniumHandler<ExtractParams<P>>): this
-  options<P extends string>(
-    path: P,
+  options(path: string, handler: IngeniumHandler): this
+  options(
+    path: string,
     optsOrFirst: RouteOptions | IngeniumMiddleware,
-    ...rest: [...IngeniumMiddleware[], IngeniumHandler<ExtractParams<P>>]
+    ...rest: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
   options(path: string, ...args: VerbArgs): this {
     return (this.method as (m: HttpMethod, p: string, ...a: VerbArgs) => this)('OPTIONS', path, ...args)
@@ -879,130 +876,10 @@ export class IngeniumApp {
     writeDefaultError(err, ctx)
   }
 
-  // ───── In-process test client ───────────────────────────────────────────
-
-  /**
-   * Dispatch a synthetic request through the framework WITHOUT binding a
-   * port or going through the transport layer. Returns the response state
-   * captured directly from the pooled context — ~10× faster than spinning
-   * an ephemeral port per test, while exercising the same dispatch path
-   * (middleware, hooks, decorators, the trie, the error boundary).
-   *
-   * Mirrors Fastify's `inject()` DX. Opt-in: zero overhead for the hot
-   * request path; this method only runs when tests call it.
-   *
-   * @example
-   *   const res = await app.inject({ method: 'POST', url: '/users', body: { name: 'A' } })
-   *   expect(res.status).toBe(201)
-   *   expect(res.json()).toEqual({ id: 1, name: 'A' })
-   */
-  async inject(req: InjectRequest): Promise<InjectResponse> {
-    if (this.dirty) await this.composeAsync()
-
-    const method = (req.method ?? 'GET') as HttpMethod
-    const url = req.url
-    const qIdx = url.indexOf('?')
-    const path = qIdx >= 0 ? url.slice(0, qIdx) : url
-    const rawQuery = qIdx >= 0 ? url.slice(qIdx + 1) : ''
-
-    // Lowercase the header keys so they match the IncomingHttpHeaders
-    // convention every other call site relies on (ctx.headers['content-type']).
-    const headers: Record<string, string | string[]> = Object.create(null) as Record<string, string | string[]>
-    if (req.headers) {
-      for (const k of Object.keys(req.headers)) {
-        const v = req.headers[k]
-        if (v !== undefined) headers[k.toLowerCase()] = v
-      }
-    }
-
-    // Body normalization. Order matters: a plain object/array implies JSON
-    // (and we synthesize a content-type if none was provided), then string /
-    // Buffer / Uint8Array each get a different conversion. Anything else is
-    // rejected with a TypeError so misuse fails loudly instead of producing
-    // a confusing 400 at the handler.
-    let bodyBuf: Buffer | null = null
-    let contentType: string | undefined =
-      typeof headers['content-type'] === 'string'
-        ? (headers['content-type'] as string)
-        : Array.isArray(headers['content-type'])
-          ? (headers['content-type'][0] as string)
-          : undefined
-
-    if (req.body !== undefined && req.body !== null) {
-      if (typeof req.body === 'string') {
-        bodyBuf = Buffer.from(req.body, 'utf8')
-      } else if (Buffer.isBuffer(req.body)) {
-        bodyBuf = req.body
-      } else if (req.body instanceof Uint8Array) {
-        bodyBuf = Buffer.from(req.body.buffer, req.body.byteOffset, req.body.byteLength)
-      } else if (typeof req.body === 'object') {
-        bodyBuf = Buffer.from(JSON.stringify(req.body), 'utf8')
-        if (!contentType) {
-          contentType = 'application/json'
-          headers['content-type'] = contentType
-        }
-      } else {
-        throw new TypeError(
-          `app.inject({ body }): unsupported body type ${typeof req.body}`,
-        )
-      }
-    }
-    const contentLength = bodyBuf?.length
-
-    // Populate ctx and dispatch. Pool acquire/release mirrors the transport
-    // adapter exactly. The release MUST happen after we read the response
-    // (release calls reset() which bumps _epoch and clears _body/_headers).
-    const ctx = this.pool.acquire()
-    let status = 500
-    let resHeaders: Record<string, string | string[]> = {}
-    let resBody = ''
-    try {
-      ctx.method = method
-      ctx.url = url
-      ctx.path = path
-      ctx.rawQuery = rawQuery
-      ctx.headers = headers
-      ctx.remoteAddress = req.remoteAddress ?? '127.0.0.1'
-      ctx.baseProtocol = 'http'
-      // Attach a body source even when the caller didn't send one — the
-      // adapter does the same so `ctx.body.stream()` is the only path that
-      // throws "no body" (preserved by IngeniumBody itself, not us).
-      if (bodyBuf !== null) {
-        ctx.body._attach(Readable.from(bodyBuf), contentType, contentLength)
-      } else {
-        ctx.body._attach(null, contentType, undefined)
-      }
-
-      await this.handle(ctx)
-
-      status = ctx._statusCode
-      // Copy headers so the caller's response object stays stable after the
-      // ctx is released and recycled by the next inject() call.
-      resHeaders = { ...ctx._headers }
-      resBody = await readResponseBody(ctx._body)
-    } finally {
-      this.pool.release(ctx)
-    }
-
-    return {
-      status,
-      headers: resHeaders,
-      body: resBody,
-      json<T = unknown>(): T {
-        return JSON.parse(resBody) as T
-      },
-    }
-  }
-
   // ───── Transport ─────────────────────────────────────────────────────────
 
   /** Bind a port and accept requests. Returns a handle for graceful shutdown. */
   async listen(port: number, host?: string): Promise<ListeningServer> {
-    if (this._listening) {
-      throw new TypeError(
-        'app.listen(): this app is already listening. Close the existing server with server.close() first.',
-      )
-    }
     if (this.dirty) await this.composeAsync()
     this.transport.attach({
       acquire: () => this.pool.acquire(),
@@ -1013,7 +890,6 @@ export class IngeniumApp {
     const handle = host !== undefined
       ? await this.transport.listen(port, host)
       : await this.transport.listen(port)
-    this._listening = true
 
     // Wrap the underlying close so cron timers + queue worker pools are torn
     // down as part of graceful shutdown. Sockets and queues drain in parallel
@@ -1021,11 +897,7 @@ export class IngeniumApp {
     const drainTimeout = this._queueDrainTimeoutMs
     const queues = this._queues
     const crons = this._crons
-    const self = this
     const wrappedClose: ListeningServer['close'] = async (closeOpts) => {
-      // Flip the listening flag BEFORE awaiting the drain so a subsequent
-      // listen() call from within a `await server.close()` chain works.
-      self._listening = false
       // Stop cron tickers FIRST so they don't enqueue new work mid-shutdown.
       crons.stopAll()
       const queueDrain = queues.drainAll(drainTimeout)

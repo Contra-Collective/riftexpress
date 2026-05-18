@@ -131,3 +131,21 @@ app.onError((err, ctx) => {
 The handler runs before the default boundary. Return value is ignored — write the response by calling a `ctx` writer. Throwing (or re-throwing the original) hands the error back to the default boundary. If your custom handler throws a *new* error, that new error is what the default boundary sees.
 
 `hooks.onError` listeners are observation only — they fire BEFORE the boundary writes a response and cannot swallow or replace the error. For logging, use `hooks.onError`; for response control, use `app.onError`.
+
+## Dev-mode warnings
+
+The framework emits `process.emitWarning` for common misuse patterns when `NODE_ENV !== 'production'`. The check is gated by a module-level `const IS_DEV` so V8 dead-code eliminates the diagnostic in production builds — zero hot-path cost.
+
+| Warning name | Condition | Once per process? |
+|---|---|---|
+| `IngeniumDoubleWriteWarning` | A `ctx.json/text/html/send/redirect/stream` writer was called after the response was already written (`ctx._written === true`). The second call wins; use `return` after the first write to short-circuit. | No — fires on every double write so each occurrence is observable. |
+| `IngeniumTrustProxyWarning` | `ctx.ip` / `ctx.ips` / `ctx.protocol` / `ctx.hostname` was read with `trustProxy: false` while the request carries `X-Forwarded-For`. Hints to configure `trustProxy` if running behind a reverse proxy. | Yes — first occurrence only. |
+| `IngeniumResponseObjectWarning` | A handler returned a fetch-style global `Response` object. Ingenium handlers return plain values or call `ctx.json/...`. The Response is ignored and the request falls through to 204. | Yes — first occurrence only. |
+| `IngeniumLateWriteWarning` | A `requestTimeoutMs`-orphaned handler eventually wrote to a context that has since been recycled (see ADR 0004). The write is swallowed. | No — every late write is observable. |
+
+These warnings are non-fatal; the request continues. They surface as warnings (not errors) so existing test runners and process listeners can catch them with `process.on('warning', ...)`.
+
+Hard misuse — situations where the framework can't safely continue — throws instead:
+
+- `app.listen()` on an app that's already listening throws `TypeError("app.listen(): this app is already listening...")`. Close the existing server first.
+- `expressCompat(knownBroken)` throws at registration time for the four broken middleware (`multer`, `express-session`, `compression`, `body-parser`) — opt out with `{ allowKnownBroken: true }` to get a warning instead.

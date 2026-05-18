@@ -6,7 +6,7 @@ an app, and plugins compose via lifecycle hooks and per-request decorators.
 ## Plugin signature
 
 ```ts
-type IngeniumPlugin<O = void> = (app: IngeniumApp, opts: O) => void | Promise<void>
+type IngeniumPlugin<O = void> = (target: PluginTarget, opts: O) => void | Promise<void>
 
 await app.register(myPlugin, opts)   // when the plugin requires options
 await app.register(myPlugin)         // when the plugin takes no options
@@ -15,6 +15,25 @@ await app.register(myPlugin)         // when the plugin takes no options
 Plugins are invoked immediately and may be async. Register them BEFORE the
 first request — registering after composition sets the dirty bit and forces a
 recompose on the next request.
+
+`PluginTarget` is implemented by both `IngeniumApp` and `ScopedApp` (returned
+by `app.scope(...)`). A plugin only uses the members of `PluginTarget`, which
+means the same plugin works whether it's registered globally or inside a scope:
+
+```ts
+const metrics: IngeniumPlugin = (target) => {
+  target.use(async (ctx, next) => {
+    const t0 = Date.now()
+    await next()
+    metricsClient.timing(ctx.path, Date.now() - t0)
+  })
+}
+
+await app.register(metrics)                        // global — every request
+await app.scope('/api', s => s.register(metrics))  // scoped — only /api/*
+```
+
+See [app.md `#app.scope`](./api/app.md#appscopeprefix-register--plugin-scoping) for the full scoping surface and the decorator caveat (decorators register globally even when called from inside a scope).
 
 ## Lifecycle order
 

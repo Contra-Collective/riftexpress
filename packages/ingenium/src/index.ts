@@ -18,14 +18,7 @@ import { apiKeyMiddleware } from './api-key/middleware.ts'
 import { openapiHandler } from './openapi/handler.ts'
 
 // ───── App + Router ────────────────────────────────────────────────────────
-export {
-  IngeniumApp,
-  type IngeniumAppOptions,
-  type IngeniumErrorHandler,
-  type RouteOptions,
-  type InjectRequest,
-  type InjectResponse,
-} from './app.ts'
+export { IngeniumApp, type IngeniumAppOptions, type IngeniumErrorHandler, type RouteOptions } from './app.ts'
 export { Router } from './router/router.ts'
 
 // ───── Context + Body ──────────────────────────────────────────────────────
@@ -238,6 +231,7 @@ export {
 // ───── Plugin system ───────────────────────────────────────────────────────
 export type {
   IngeniumPlugin,
+  PluginTarget,
   Hooks,
   RegistrationEvent,
   Decorator,
@@ -251,6 +245,7 @@ export type {
 } from './plugin/types.ts'
 export { HooksRegistry } from './plugin/hooks.ts'
 export { DecoratorRegistry } from './plugin/decorators.ts'
+export { ScopedApp } from './app/scope.ts'
 
 // ───── Default factory + body parsers ──────────────────────────────────────
 

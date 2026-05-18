@@ -1,21 +1,44 @@
 # Ingenium Roadmap
 
+## ⚠️ Production caveats — read first
+
+**Not production-ready for multi-instance deploys.** The default in-memory stores for sessions, idempotency, and rate-limit don't share state across pods. Use the Redis-backed adapters in [`ingenium-redis`](../packages/ingenium-redis) before deploying behind a load balancer.
+
+**Alpha API surface.** Verb registration, `ctx` shape, and middleware composition are stable enough to use; everything tagged `@internal` may change before 0.1.0.
+
+## Version targets
+
+| Milestone | Goal | Status |
+|---|---|---|
+| **v0.0.x** | Feature-complete framework surface; alpha API. | current |
+| **v0.1.0** | All Redis stores shipped; plugin scoping; `ExtractParams` runtime narrowing; benchmark matrix on CI. | in progress |
+| **v1.0.0** | API frozen. SemVer stability commitment. Production deployments officially supported. | planned |
+
 ## Shipped in v0.0.1
 
 - `ingenium()` app factory with lazy-composed middleware pipeline and `app.compose()` pre-warm.
 - `Router()` with prefix mounting and nested routers.
 - `IngeniumContext` request/response surface (params, query, headers, `state`, status/header setters, terminal writers `json` / `text` / `html` / `send` / `redirect` / `stream`).
-- `IngeniumBody` lazy parsers: `json` (with optional Zod-like schema + `maxBytes`), `text`, `urlencoded`, `buffer`, `stream`.
+- `IngeniumBody` lazy parsers: `json`, `text`, `urlencoded`, `buffer`, `stream`, `multipart`. **Buffer-level parse cache** — multiple consumers can re-read the body without "already consumed" errors.
+- `app.inject({ method, url, headers, body })` — in-process test client returning `{ status, headers, body, json<T>() }`. No socket, no transport — same dispatch path as the wire.
+- `app.scope(prefix, register)` — plugin and middleware scoping onto a path subtree. Compose-time resolution; hot path unchanged. Plugins target `PluginTarget` (implemented by both `IngeniumApp` and `ScopedApp`).
+- Type-level `ExtractParams<Path>` narrowing on verb handlers — `app.get('/users/:id', ctx => ctx.params.id)` types as `string`.
+- `ctx.query.parse(schema)` symmetric with `ctx.body.json(schema)`. Shallow-array-aware coercion (repeated keys → `string[]`).
 - Handler return-value reflection (object → JSON, string → text/html, `Buffer` → octet-stream, `Readable` → stream, `undefined` → 204).
 - Path syntax with `:param`, `:param?`, `*wild`, deterministic precedence (static > param > wildcard).
 - Error class hierarchy (`IngeniumError` and friends) with default JSON error boundary; `app.onError` override + re-throw delegation.
-- Express compat shim (`expressCompat`) for pure-function middleware (cors, helmet, etc.).
+- Standard Schema v1 integration in `ctx.body.json(schema)` and `ctx.query.parse(schema)` (alongside Zod-style `safeParse` and duck-typed `{ parse }`).
+- Express compat shim (`expressCompat`) for pure-function middleware (cors, helmet, etc.); detect-and-throw on known-broken (`multer`, `express-session`, `compression`, `body-parser`).
 - Node HTTP adapter with `app.listen(port, host?)` returning `{ port, close }`.
-- **Bun adapter** (`ingenium-bun`) — `BunAdapter` transport for `Bun.serve()` sharing the same `app.handle(ctx)` dispatch entry, with a Web-Streams ↔ `node:stream` bridge.
-- **Plugin system** — `app.register(plugin, opts?)` with lifecycle hooks (`onRoute`, `onCompose`, `onRequest`, `onResponse`, `onError`) and per-request decorators (`app.decorate` lazy, `app.decorateRequest` eager). Hot path short-circuits when nothing is registered.
-- **Static file middleware** — `ingenium.static(root, opts?)` with ETag, conditional GET, range requests, MIME detection, `index` / `extensions` / `dotfiles` / `maxAge` options.
-- **CLI scaffolder** — `ingenium new <name> [--bun|--minimal]` (`ingenium-cli`) for bootstrapping new apps.
-- **ADR docs** — `docs/adr/0001`–`0005` covering the load-bearing decisions (radix-trie router, lazy composition with dirty bit, return-value reflection, context pool, compat shim scope).
+- Bun adapter (`ingenium-bun`) — `BunAdapter` transport for `Bun.serve()` sharing the same `app.handle(ctx)` dispatch entry, with a Web-Streams ↔ `node:stream` bridge.
+- HTTP/2 (h2) + HTTP/2 cleartext (h2c) transports.
+- WebSocket support via the opt-in `ws` peer dep; SSE helper sharing the same dispatch entry.
+- Plugin system — `app.register(plugin, opts?)` with lifecycle hooks (`onRoute`, `onCompose`, `onRequest`, `onResponse`, `onError`) and per-request decorators (`app.decorate` lazy, `app.decorateRequest` eager). Hot path short-circuits when nothing is registered.
+- Production primitives — `ingenium.static`, `ingenium.cors`, `ingenium.csrf`, `ingenium.rateLimit`, `sessionMiddleware`, `ingenium.idempotency`, `ingenium.jwt`, `ingenium.apiKey`, `ingenium.problemDetails`, content negotiation, trust-proxy, graceful shutdown.
+- Hardening — header injection guard, `ctx.json()` safety on circular/BigInt, `IngeniumTimeoutError` (503) with late-write protection via the `_epoch` counter, hard transport-layer body cap (`maxRequestBytes`).
+- Dev-mode footgun warnings (NODE_ENV-gated, zero prod cost) — `IngeniumDoubleWriteWarning`, `IngeniumTrustProxyWarning`, `IngeniumResponseObjectWarning`, plus a hard `TypeError` on `app.listen()` called twice.
+- CLI scaffolder — `ingenium new <name> [--bun|--minimal]` (`ingenium-cli`) for bootstrapping new apps.
+- ADR docs — `docs/adr/0001`–`0005` covering the load-bearing decisions (radix-trie router, lazy composition with dirty bit, return-value reflection, context pool, compat shim scope).
 
 ---
 
@@ -30,27 +53,47 @@ during development, not marketing material.
 
 ---
 
+## Known issues — bugs
+
+- **Static middleware doesn't honor `If-Modified-Since`** — only `If-None-Match`.
+- **`ExtractParams` doesn't narrow constrained params** — `:id(\\d+)` strips the constraint and stays `string`. Unconstrained params (`:id`) now narrow correctly. The router doesn't yet honor inline constraints at runtime; types and runtime have to land together.
+
+## Known issues — gaps
+
+- **Compat shim long-tail beyond the known-broken list** — middleware that own `res.end` outside the four detected ones (`multer`, `express-session`, `compression`, `body-parser`) silently misbehave. Workaround: use the native equivalents.
+- **No per-route OpenAPI inline schema yet** — schemas live in a separate `app.describe(...)` call instead of `app.get('/path', { response: Schema }, handler)`. Tracked for 0.1.0.
+
+---
+
 ## Deferred to next session
 
 ### Full benchmark matrix vs Fastify + Hono on CI
 
 The local `bench:v2` harness covers hello-world, JSON echo, and middleware-stack on Node — and includes Hono, Fastify, and Express side-by-side. What's still missing: pinned dependency versions, isolated CPU pinning, Bun runs in the same matrix, 1KB / 100KB payload scenarios, RSS tracking, and a CI runner that publishes the numbers per PR. Honest comparative numbers need that infra; spinning it up is its own session.
 
-### TypeBox / Standard Schema integration
+### Per-route option object with response schema + OpenAPI hints inline
 
-First-class support for [Standard Schema](https://standardschema.dev) so `ctx.body.json(schema)` works with TypeBox, Valibot, ArkType, etc., not just Zod's `safeParse`. Deferred because the current `{ parse(input): T }` duck-type already covers Zod and most validators; promoting to Standard Schema is a small but non-trivial type-level change worth doing deliberately.
+`app.get('/path', { response: ResponseSchema, tags: ['users'] }, handler)` so OpenAPI generation stops requiring a separate `describe(...)` call.
+
+### `app.route('/users/:id').get(h).put(h)` chainable builder
+
+Pure registration-time sugar over the existing verbs; sets up cleanly for per-route metadata.
+
+### Typed `ctx.cookies` first-class API
+
+Today cookies live inside `sessionMiddleware` / `csrf`. A small `ctx.cookies.get(name)` / `ctx.cookies.set(name, value, opts)` with signed-cookie support pays for itself across CSRF, session, and any auth plugin.
+
+### TypeBox-specific bridge
+
+Standard Schema v1 covers TypeBox already; a tighter integration that consumes TypeBox compiled validators could shave validation overhead. Worth doing only after the benchmark matrix lands so the gain is measurable.
 
 ### Constrained param type narrowing
 
 Extend `ExtractParams<Path>` to recognize numeric / regex / enum constraints in the path syntax (e.g. `/users/:id(\\d+)`) and narrow `ctx.params.id` to `number`. Deferred because the routing layer doesn't yet honor inline constraints at runtime; types and runtime have to land together.
 
-### Native multipart / file upload
+### Scoped decorators
 
-A `ctx.body.multipart()` API so `multer`-shaped use cases stop needing a hand-rolled parser. The compat shim can't proxy `multer` because it owns the request stream; this needs to be native.
-
-### Native rate-limit + session helpers
-
-`express-rate-limit`, `express-session`, and `csurf` all hook the Express response lifecycle in ways the compat shim can't proxy. v0.1 should ship minimal native equivalents (or a documented integration path) so users aren't forced to drop down to the raw transport.
+`app.scope(...)` scopes middleware today but decorators remain global (a lazy decorator installs onto the pooled context at request start, before the route is matched). Making them path-aware requires a runtime check on every property access — measure before shipping.
 
 ---
 
@@ -58,5 +101,12 @@ A `ctx.body.multipart()` API so `multer`-shaped use cases stop needing a hand-ro
 
 - **Lazy compose dirty-bit cost under heavy mutation.** Apps that register routes per-request (rare, but possible in plugin-heavy or hot-reload setups) will recompose on every request. Do we cap it, warn after N recomposes per minute, or expose a `freeze()` toggle for production?
 - **Compat shim long-tail support strategy.** The Express ecosystem is huge and each `req` / `res` accessor we proxy widens the surface. Do we aim for "covers the top 20 middleware on npm" with documented gaps, or stay minimal and route everyone to native ports?
-- **Standard Schema vs Zod-specific.** Should the `schema` arg on `ctx.body.json` accept `StandardSchemaV1` natively (and we ship our own minimal implementation for users without a validator), or stay duck-typed on `{ parse }` and let users adapt? The former is more ergonomic; the latter keeps the core dep-free.
-- **Plugin scoping.** Today a plugin's hooks and decorators apply to the entire app. Should we add a "scope" concept (Fastify-style) so a plugin registered under `app.use('/api', subApp)` only affects requests below that mount point? Useful for multi-tenant apps; significant complexity cost.
+
+---
+
+## Non-goals
+
+- **A full Express drop-in.** The compat shim is for the long tail of `(req, res, next)` middleware; it is not a goal to make Express apps work unmodified. The migration guide is the supported path.
+- **A monorepo bundler / framework wrapper.** Ingenium is the HTTP framework. View templating, ORM, CLI for app structure are out of scope.
+- **Multi-runtime fetch-style `Response` interop.** Handlers return plain values or call `ctx` writers. We will not add `return new Response(...)` translation; the dev warning makes the mistake loud and the fix is one line.
+- **A community plugin marketplace.** Plugins are npm packages; discovery happens via npm and the docs index.

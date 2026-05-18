@@ -176,6 +176,67 @@ await server.close({ gracefulTimeoutMs: 10_000 })
 
 For SIGTERM-driven shutdown, wire `gracefulShutdown(server, opts)` after — see [transports.md](./transports.md#gracefulshutdown).
 
+Calling `app.listen()` twice on the same app throws `TypeError("app.listen(): this app is already listening...")`. Close the existing server (`server.close()`) before re-listening, or create a separate app.
+
+#### `app.inject(req)` — in-process test client
+
+```ts
+interface InjectRequest {
+  method?: HttpMethod          // defaults to 'GET'
+  url: string                  // includes query string, e.g. '/users/42?expand=posts'
+  headers?: Record<string, string | string[]>   // keys lowercased before assignment
+  body?: string | Buffer | Uint8Array | object  // object → JSON-stringified + auto content-type
+  remoteAddress?: string       // defaults to '127.0.0.1'
+}
+
+interface InjectResponse {
+  status: number
+  headers: Record<string, string | string[]>
+  body: string                 // UTF-8; streams drained; buffers decoded
+  json<T = unknown>(): T       // JSON.parse(body)
+}
+
+inject(req: InjectRequest): Promise<InjectResponse>
+```
+
+Dispatch a synthetic request through the framework WITHOUT binding a port or going through the transport layer. Returns the response state captured directly from the pooled context — ~10× faster than spinning an ephemeral port per test, while exercising the same dispatch path (middleware, hooks, decorators, the trie, the error boundary).
+
+```ts
+const res = await app.inject({
+  method: 'POST',
+  url: '/users',
+  body: { name: 'Ada' },
+})
+expect(res.status).toBe(201)
+expect(res.json()).toEqual({ id: 1, name: 'Ada' })
+```
+
+Body normalization: a plain object/array gets `JSON.stringify`'d and `content-type: application/json` auto-set (unless the caller already set one). String → UTF-8 buffer; `Buffer`/`Uint8Array` → verbatim. Anything else throws `TypeError` at call time. Each `inject()` acquires from and releases to the same context pool the wire path uses — sequential calls are correctly isolated.
+
+#### `app.scope(prefix, register)` — plugin scoping
+
+```ts
+scope(prefix: string, register: (scope: ScopedApp) => void | Promise<void>): this
+```
+
+Mount middleware, plugins, and routes onto a path subtree. The registrar receives a `ScopedApp` — a facade implementing `PluginTarget` that translates every `use(mw)` / `get(path, h)` / `register(plugin)` call into a prefix-relative registration on the root app. Compose-time resolution: the hot path is unchanged.
+
+```ts
+app.scope('/api/v2', (scope) => {
+  scope.use(requireAuth)                  // applies only under /api/v2
+  scope.register(metricsPlugin)           // plugin's target.use/get are prefix-relative
+  scope.get('/users', listUsers)          // → /api/v2/users
+  scope.scope('/admin', (admin) => {      // nested → /api/v2/admin/...
+    admin.use(requireAdminRole)
+    admin.delete('/users/:id', deleteUser)
+  })
+})
+```
+
+`ScopedApp` surface: `use`, `get/post/put/patch/delete/head/options/method`, `register`, `before`, `after`, `scope`, `decorate`/`decorateRequest` (with a dev warning — see below), and `hooks` (read-only; hooks are global by design). It does NOT expose `compose`, `handle`, `listen`, `onError`, `queue`, `cron`, or `describe` — those stay on the root app.
+
+**Decorator caveat.** `scope.decorate(name, factory)` registers the decorator GLOBALLY (it applies to every context, regardless of scope) and emits a one-shot `process.emitWarning` in dev mode. The reason: lazy decorators install on the pooled context at request start, before the route is matched, so per-scope decorators would force a runtime path check on every property access. If you need scope-aware behavior, either path-check inside the decorator's resolver (`if (ctx.path.startsWith('/api/v2')) ...`) or use a scoped middleware (`scope.use(mw)`) instead.
+
 ## `IngeniumErrorHandler`
 
 ```ts

@@ -11,6 +11,18 @@ deferred items and likely-to-shift surfaces.
 
 ## [Unreleased]
 
+### Added — QOL pass
+
+- **Typed route params from the path string.** `app.get('/users/:id', ctx => ctx.params)` now narrows `ctx.params` to `{ id: string }`. `ExtractParams<Path>` was already exported as a type utility; the verb overloads on `Router` and `IngeniumApp` now pass it through to the handler signature. Pure type-level — zero runtime cost.
+- **`app.inject({ method, url, headers, body })`** — in-process test client returning `{ status, headers, body, json<T>() }`. Bypasses the socket and transport entirely; ~10× faster than ephemeral-port integration tests. Mirrors Fastify's `inject()` DX. New exports: `InjectRequest`, `InjectResponse`.
+- **`ctx.body.json()` parse cache.** Multiple consumers can now read the body without "already consumed" errors — an audit middleware can peek at the body and the handler can still parse it. Buffer-level cache, so different schemas across calls each validate cleanly against fresh-parsed JSON. `stream()` and `multipart()` remain terminal (opt out of the cache).
+- **Plugin scoping.** `app.scope('/api/v2', s => s.use(authPlugin))` lets plugins decorate only a subtree. Compose-time resolution — the hot path is unchanged. Plugins now accept a `PluginTarget` (implemented by both `IngeniumApp` and `ScopedApp`). New exports: `ScopedApp`, `PluginTarget`. Limitation: decorators remain global in v1 (a `scope.decorate(...)` call emits a dev-mode warning explaining how to make the resolver path-aware).
+- **Dev-mode footgun warnings**, all gated by `NODE_ENV !== 'production'` so V8 dead-code eliminates them in prod builds:
+  - `IngeniumDoubleWriteWarning` — `ctx.json()` called after the response was already written.
+  - `IngeniumTrustProxyWarning` — `ctx.ip` (or `ips`/`protocol`/`hostname`) read with `trustProxy: false` while the request carries `X-Forwarded-For`. Fires once per process.
+  - `IngeniumResponseObjectWarning` — handler returned a fetch-style `Response` object. Fires once per process; the Response is ignored and the request falls through to 204.
+  - `TypeError` thrown when `app.listen()` is called on an app that's already listening (instead of an unclear `EADDRINUSE`).
+
 ### Added — P0 production hardening (items 2–8)
 
 - **Per-request timeout** (`ingenium({ requestTimeoutMs })`). New `IngeniumTimeoutError` (503). Late-write protection via per-context `_epoch` counter — orphaned-handler writes after a timeout are detected and discarded so the next request bound to the same pooled context isn't corrupted.

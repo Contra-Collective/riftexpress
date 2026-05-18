@@ -15,6 +15,29 @@ class IngeniumBody {
 
 The default size limit for `json`, `text`, `urlencoded`, `buffer`, and `multipart.maxBytes` is **100,000 bytes**, matching Express's `body-parser` default of `'100kb'`. Override per call.
 
+### Buffer-level parse cache
+
+`json`, `text`, `urlencoded`, and `buffer` share a single cached `Buffer` of the raw request bytes. The first consumer reads the wire and caches; subsequent calls re-decode from the cache. This means an audit / logging middleware can peek at the body and the handler can still parse it:
+
+```ts
+app.use(async (ctx, next) => {
+  if (ctx.headers['content-type']?.startsWith('application/json')) {
+    const body = await ctx.body.json()      // first read — caches the buffer
+    logger.info({ path: ctx.path, body })
+  }
+  await next()
+})
+
+app.post('/users', async (ctx) => {
+  const user = await ctx.body.json(UserSchema)  // re-decodes from cache, validates fresh
+  return user
+})
+```
+
+The cache stores **raw bytes**, not parsed objects — different schemas on different reads all validate against fresh `JSON.parse` output. `stream()` and `multipart()` are **terminal**: they consume the source and disable subsequent reads.
+
+`maxBytes` is enforced against the cached length on every subsequent call — a second consumer passing a tighter cap than the original still gets a 413.
+
 ## `json(schema?, maxBytes?)`
 
 ```ts

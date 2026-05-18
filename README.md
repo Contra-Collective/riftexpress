@@ -752,6 +752,44 @@ All three throw `IngeniumValidationError` with a `fields: Record<string, string>
 
 ---
 
+## Testing with `app.inject()`
+
+Drop the ephemeral-port dance for unit tests — dispatch a synthetic request straight through the framework:
+
+```ts
+const app = ingenium()
+app.post('/users', async (ctx) => ctx.json(await ctx.body.json(), 201))
+
+const res = await app.inject({
+  method: 'POST',
+  url: '/users',
+  body: { name: 'Ada' },
+})
+
+expect(res.status).toBe(201)
+expect(res.json()).toEqual({ name: 'Ada' })
+```
+
+Body conversion: `string` → UTF-8 buffer, `Buffer` / `Uint8Array` → verbatim, plain object/array → `JSON.stringify` + auto `content-type: application/json`. Streams are drained into a UTF-8 string for `res.body`. Same composed middleware + hooks + error boundary as the wire path; ~10× faster than ephemeral-port tests.
+
+---
+
+## Plugin scoping with `app.scope()`
+
+Mount plugins (and their middleware) onto a subtree:
+
+```ts
+app.scope('/api/v2', (scope) => {
+  scope.use(requireAuth)           // only /api/v2/*
+  scope.register(metricsPlugin)    // plugin's use() / get() / etc. are prefix-relative
+  scope.get('/users', listUsers)   // → /api/v2/users
+})
+```
+
+Compose-time resolution — the per-request hot path is unchanged. The same `IngeniumPlugin` shape works on both the root app and a scope (both implement `PluginTarget`). Decorators called from inside a scope still register globally and emit a dev-mode warning explaining why (the lazy decorator runs before the route is matched). For per-route auth, prefer `scope.use(authMw)` over `scope.decorate(...)`.
+
+---
+
 ## Reference application
 
 [`apps/notes-api/`](apps/notes-api) is a small but realistic notes service that exercises the full feature surface:
@@ -885,13 +923,12 @@ See [docs/roadmap.md](docs/roadmap.md) for the full breakdown. Highlights:
 
 **Known issues:**
 - Compat shim long-tail: middleware that own `res.end` (compression, express-session) silently misbehave — documented but worth surfacing better
-- `ctx.query.parse(schema)` doesn't exist yet — only body validation has the schema affordance
-- `ExtractParams` doesn't narrow constrained params (`:id(\\d+)` stays `string`)
-- `ctx.query.parse(schema)` mirrors `ctx.body.json(schema)` but uses a fixed coercion model — see the [Schema validation](#schema-validation) section for the trade-offs
+- `ExtractParams` doesn't narrow **constrained** params (`:id(\\d+)` stays `string`). Unconstrained params (`:id`) now narrow correctly through the verb overloads.
+- `ctx.query.parse(schema)` uses a fixed shallow-array-aware coercion model — see the [Schema validation](#schema-validation) section for the trade-offs
 
 **Deferred to next session:**
-- Plugin scoping (Fastify-style sub-app affinity)
 - TypeBox-specific bridge (Standard Schema covers it but a tighter integration could be cleaner)
+- Scoped decorators (`app.scope()` scopes middleware today; decorators remain global — see `app.scope()` JSDoc for the rationale)
 
 ---
 

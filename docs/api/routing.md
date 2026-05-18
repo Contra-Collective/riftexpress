@@ -89,7 +89,17 @@ The string union and the corresponding readonly array. Both are exported from `'
 
 ## `ExtractParams<Path>`
 
-A template-literal type that recursively extracts named params from a path string. Used to type `ctx.params` in route handlers without manual annotation.
+A template-literal type that recursively extracts named params from a path string. **Applied automatically** by every verb registration on both `Router` and `IngeniumApp` — handlers receive `IngeniumHandler<ExtractParams<P>>` so `ctx.params` is narrowed without any manual annotation:
+
+```ts
+app.get('/users/:id/posts/:slug?', (ctx) => {
+  ctx.params.id      // string
+  ctx.params.slug    // string | undefined
+  ctx.params.bogus   // TS error — not in the path
+})
+```
+
+The pure type-level form is still exported if you need to compute the param shape independently of a handler:
 
 ```ts
 type ExtractParams<Path extends string> = Path extends `${string}:${infer Param}/${infer Rest}`

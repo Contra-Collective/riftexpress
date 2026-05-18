@@ -7,7 +7,8 @@ This is the locked public API for downstream code (tests, compat shim, examples,
 ```ts
 import {
   ingenium,                       // function: creates IngeniumApp
-  Router,                    // function: creates a mountable Router
+  Router,                         // function: creates a mountable Router
+  ScopedApp,                      // returned by app.scope() — facade for scoped registration
   IngeniumContext,                // class
   IngeniumBody,                   // class (on ctx.body)
   IngeniumError,
@@ -21,6 +22,9 @@ import {
   type IngeniumMiddleware,
   type ExtractParams,
   type HttpMethod,
+  type PluginTarget,              // structural type implemented by IngeniumApp + ScopedApp
+  type InjectRequest,             // synthetic request for app.inject()
+  type InjectResponse,            // captured response from app.inject()
 } from 'ingenium'
 ```
 
@@ -44,6 +48,8 @@ app.onError((err: unknown, ctx: IngeniumContext) => unknown | Promise<unknown>):
 app.compose(): void                       // explicit pre-warm; auto-runs lazily on first request
 app.handle(ctx: IngeniumContext): Promise<void>  // dispatch entry, used by adapters
 app.listen(port: number, host?: string): Promise<{ port: number; close: () => Promise<void> }>
+app.inject(req: InjectRequest): Promise<InjectResponse>  // in-process test client (no socket)
+app.scope(prefix: string, register: (scope: ScopedApp) => void | Promise<void>): this  // plugin/middleware scoping
 
 // Built-in middleware (no install required):
 ingenium.json(opts?:    { limit?: number }): IngeniumMiddleware     // sets ctx.body parsing default
@@ -99,14 +105,17 @@ class IngeniumContext<Params = Record<string, string>> {
 
 ```ts
 class IngeniumBody {
-  json<T>(schema?: ZodLikeSchema<T>, maxBytes?: number): Promise<T>
+  json<T>(schema?: StandardSchemaV1<unknown, T> | { safeParse } | { parse }, maxBytes?: number): Promise<T>
   text(maxBytes?: number): Promise<string>
   urlencoded(maxBytes?: number): Promise<Record<string, string>>
-  buffer(maxBytes?: number): Promise<Buffer>           // default limit 1 MiB
-  stream(): Readable                                    // raw node:stream Readable
+  buffer(maxBytes?: number): Promise<Buffer>           // default limit 100 KB
+  stream(): Readable                                    // raw node:stream Readable; opts out of cache
+  multipart(opts?: MultipartOptions): Promise<MultipartResult>  // terminal; opts out of cache
 }
-// Schema may be Zod (uses safeParse) or any { parse(input): T } compatible.
+// Schema detection order: Standard Schema v1 ['~standard'] → Zod-like safeParse → { parse(input): T }.
 // Validation failure throws IngeniumValidationError with field-level `fields`.
+// Buffer-level cache: json/text/urlencoded/buffer can be called repeatedly without "already consumed";
+// the raw bytes are cached on first read and re-decoded on subsequent calls.
 ```
 
 ## Middleware

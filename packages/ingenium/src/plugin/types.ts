@@ -1,6 +1,6 @@
 import type { IngeniumContext } from '../context/context.ts'
 import type { IngeniumHandler, IngeniumMiddleware } from '../middleware/types.ts'
-import type { Router } from '../router/router.ts'
+import type { RouteBuilder, Router } from '../router/router.ts'
 import type { HttpMethod } from '../router/types.ts'
 
 /**
@@ -60,6 +60,12 @@ export interface PluginTarget {
     path: string,
     ...args: [...IngeniumMiddleware[], IngeniumHandler]
   ): this
+
+  /**
+   * Chainable per-path builder. Same path-joining rules as the bare verbs —
+   * inside a `ScopedApp`, the builder's emitted routes are prefix-relative.
+   */
+  route<P extends string>(path: P): RouteBuilder<P>
 
   /** Convenience verb shortcuts (paths are relative to this target). */
   get(path: string, handler: IngeniumHandler): this

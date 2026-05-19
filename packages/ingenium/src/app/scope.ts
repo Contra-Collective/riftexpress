@@ -42,7 +42,7 @@
 
 import type { IngeniumApp } from '../app.ts'
 import type { IngeniumHandler, IngeniumMiddleware } from '../middleware/types.ts'
-import type { Router } from '../router/router.ts'
+import { RouteBuilder, type Router } from '../router/router.ts'
 import type { HttpMethod } from '../router/types.ts'
 import type {
   EagerDecorator,
@@ -258,6 +258,19 @@ export class ScopedApp implements PluginTarget {
       ...args,
     )
     return this
+  }
+
+  /**
+   * Chainable per-path builder. The builder closes over `this.method`, which
+   * already does the scope-prefix join — so the same builder works identically
+   * on the root app and inside a scope. Typed params via `ExtractParams<P>`
+   * narrow against the RELATIVE path the user wrote, matching what the bare
+   * verb form does.
+   */
+  route<P extends string>(path: P): RouteBuilder<P> {
+    return new RouteBuilder<P>((method, args) =>
+      (this.method as (m: HttpMethod, p: string, ...a: unknown[]) => unknown)(method, path, ...args),
+    )
   }
 
   // ───── Decorators (GLOBAL — see file header) ───────────────────────────
